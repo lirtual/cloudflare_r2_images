@@ -1,14 +1,11 @@
+import { v4 as uuidv4 } from 'uuid';
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    
-    // Handle image requests
-    if (url.pathname.startsWith('/image/')) {
-      return handleImageRequest(request, env);
-    }
-    
-    // Handle proxy requests
-    return handleProxyRequest(request, env);
+    return url.pathname.startsWith('/image/')
+      ? handleImageRequest(request, env)
+      : handleProxyRequest(request, env);
   }
 };
 
@@ -35,35 +32,19 @@ async function handleImageRequest(request, env) {
 
 async function handleProxyRequest(request, env) {
   const url = new URL(request.url);
-  const imageUrl = decodeURIComponent(url.pathname.slice(1));
-  
-  if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
-    return new Response(JSON.stringify({ error: "Invalid image URL" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const imageUrl = ensureProtocol(decodeURIComponent(url.pathname.slice(1)));
   
   try {
-    const response = await fetch(imageUrl);
-    if (!response.ok) {
-      throw new Error("Unable to fetch image");
-    }
-    
+    const response = await fetchImage(imageUrl);
     const contentType = response.headers.get("Content-Type");
-    if (!contentType || !contentType.startsWith("image/")) {
-      throw new Error("Not a valid image");
-    }
+    validateImageContentType(contentType);
     
     const arrayBuffer = await response.arrayBuffer();
-    const fileName = imageUrl.split("/").pop();
+    const uniqueFileName = generateUniqueFileName(imageUrl);
     
-    await env.BUCKET.put(fileName, arrayBuffer, {
-      contentType: contentType,
-    });
+    await saveImageToBucket(env, uniqueFileName, arrayBuffer, contentType);
     
-    const newImageUrl = `${url.origin}/image/${fileName}`;
-    
+    const newImageUrl = `${url.origin}/image/${uniqueFileName}`;
     return new Response(JSON.stringify({ url: newImageUrl }), {
       headers: { "Content-Type": "application/json" },
     });
@@ -74,4 +55,38 @@ async function handleProxyRequest(request, env) {
       headers: { "Content-Type": "application/json" },
     });
   }
+}
+
+function ensureProtocol(url) {
+  return url.startsWith('http://') || url.startsWith('https://')
+    ? url
+    : 'https://' + url;
+}
+
+async function fetchImage(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to fetch image");
+  }
+  return response;
+}
+
+function validateImageContentType(contentType) {
+  if (!contentType || !contentType.startsWith("image/")) {
+    throw new Error("Invalid image content type");
+  }
+}
+
+function generateUniqueFileName(imageUrl) {
+  const timestamp = Date.now();
+  const uuid = uuidv4();
+  const originalFileName = imageUrl.split("/").pop();
+  const fileExtension = originalFileName.split('.').pop();
+  return `${timestamp}-${uuid}.${fileExtension}`;
+}
+
+async function saveImageToBucket(env, fileName, arrayBuffer, contentType) {
+  await env.BUCKET.put(fileName, arrayBuffer, {
+    contentType: contentType,
+  });
 }
