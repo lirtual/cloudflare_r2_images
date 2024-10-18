@@ -28,6 +28,19 @@ async function handleImageRequest(request, env) {
     object.writeHttpMetadata(headers);
     headers.set("etag", object.httpEtag);
     
+    // 设置缓存控制
+    headers.set("Cache-Control", "public, max-age=31536000");
+    
+    // 设置内容类型
+    const contentType = object.httpMetadata.contentType || 'application/octet-stream';
+    headers.set("Content-Type", contentType);
+    
+    // 处理条件请求
+    const ifNoneMatch = request.headers.get("If-None-Match");
+    if (ifNoneMatch && ifNoneMatch === object.httpEtag) {
+      return new Response(null, { status: 304, headers });
+    }
+    
     return new Response(object.body, { headers });
   } catch (error) {
     console.error("Error retrieving image:", error);
@@ -60,10 +73,11 @@ async function handleProxyRequest(request, env) {
     // Calculate hash of file content
     const hashHex = await sha256(arrayBuffer);
     
-    // Generate unique filename
-    const originalFileName = imageUrl.split("/").pop();
-    const fileExtension = originalFileName.split('.').pop();
-    const uniqueFileName = `${hashHex}.${fileExtension}`;
+    // Get file extension based on content type
+    const fileExtension = getFileExtension(contentType);
+    
+    // Generate unique filename with appropriate extension
+    const uniqueFileName = `${hashHex}${fileExtension}`;
     
     // Check if the file already exists in R2
     const existingObject = await env.BUCKET.head(uniqueFileName);
@@ -86,5 +100,22 @@ async function handleProxyRequest(request, env) {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
+  }
+}
+
+function getFileExtension(contentType) {
+  switch (contentType) {
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/png':
+      return '.png';
+    case 'image/gif':
+      return '.gif';
+    case 'image/webp':
+      return '.webp';
+    case 'image/svg+xml':
+      return '.svg';
+    default:
+      return '.bin'; // Default extension for unknown types
   }
 }
