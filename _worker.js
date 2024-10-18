@@ -1,11 +1,16 @@
-import { v4 as uuidv4 } from 'uuid';
+import { sha256 } from './utils/hash';
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    return url.pathname.startsWith('/image/')
-      ? handleImageRequest(request, env)
-      : handleProxyRequest(request, env);
+    
+    // Handle image requests
+    if (url.pathname.startsWith('/image/')) {
+      return handleImageRequest(request, env);
+    }
+    
+    // Handle proxy requests
+    return handleProxyRequest(request, env);
   }
 };
 
@@ -32,19 +37,46 @@ async function handleImageRequest(request, env) {
 
 async function handleProxyRequest(request, env) {
   const url = new URL(request.url);
-  const imageUrl = ensureProtocol(decodeURIComponent(url.pathname.slice(1)));
+  let imageUrl = decodeURIComponent(url.pathname.slice(1));
+  
+  // Check if the protocol is included, if not, add 'https://'
+  if (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+    imageUrl = 'https://' + imageUrl;
+  }
   
   try {
-    const response = await fetchImage(imageUrl);
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      throw new Error("Unable to fetch image");
+    }
+    
     const contentType = response.headers.get("Content-Type");
-    validateImageContentType(contentType);
+    if (!contentType || !contentType.startsWith("image/")) {
+      throw new Error("Not a valid image");
+    }
     
     const arrayBuffer = await response.arrayBuffer();
-    const uniqueFileName = generateUniqueFileName(imageUrl);
     
-    await saveImageToBucket(env, uniqueFileName, arrayBuffer, contentType);
+    // Calculate hash of file content
+    const hashHex = await sha256(arrayBuffer);
+    
+    // Generate unique filename
+    const originalFileName = imageUrl.split("/").pop();
+    const fileExtension = originalFileName.split('.').pop();
+    const uniqueFileName = `${hashHex}.${fileExtension}`;
+    
+    // Check if the file already exists in R2
+    const existingObject = await env.BUCKET.head(uniqueFileName);
+    
+    if (!existingObject) {
+      // If the file doesn't exist, save it to R2
+      await env.BUCKET.put(uniqueFileName, arrayBuffer, {
+        contentType: contentType,
+      });
+    }
     
     const newImageUrl = `${url.origin}/image/${uniqueFileName}`;
+    
     return new Response(JSON.stringify({ url: newImageUrl }), {
       headers: { "Content-Type": "application/json" },
     });
@@ -55,38 +87,4 @@ async function handleProxyRequest(request, env) {
       headers: { "Content-Type": "application/json" },
     });
   }
-}
-
-function ensureProtocol(url) {
-  return url.startsWith('http://') || url.startsWith('https://')
-    ? url
-    : 'https://' + url;
-}
-
-async function fetchImage(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("Failed to fetch image");
-  }
-  return response;
-}
-
-function validateImageContentType(contentType) {
-  if (!contentType || !contentType.startsWith("image/")) {
-    throw new Error("Invalid image content type");
-  }
-}
-
-function generateUniqueFileName(imageUrl) {
-  const timestamp = Date.now();
-  const uuid = uuidv4();
-  const originalFileName = imageUrl.split("/").pop();
-  const fileExtension = originalFileName.split('.').pop();
-  return `${timestamp}-${uuid}.${fileExtension}`;
-}
-
-async function saveImageToBucket(env, fileName, arrayBuffer, contentType) {
-  await env.BUCKET.put(fileName, arrayBuffer, {
-    contentType: contentType,
-  });
 }
